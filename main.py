@@ -1,12 +1,15 @@
 import cv2
 import requests
-
+from time import time
 face_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_frontalface_default.xml")
 eye_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_eye.xml")
 
-base_url = "https://collectibles-obtain-legs-beauty.trycloudflare.com/"
+base_url = "https://clothing-oops-patio-strategies.trycloudflare.com/"
 add_face_url = base_url
 recognize_face_url = base_url
+
+user_to_delete = None
+del_time_stamp = 0
 
 def get_cropped_faces(img):
     gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -78,6 +81,7 @@ def capture_faces(max_snaps=60):
     return face_images, name
 
 def recognize_faces():
+    global user_to_delete, del_time_stamp
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
@@ -118,9 +122,13 @@ def recognize_faces():
                         face_data = recognized_faces[i]
                         name = face_data.get("name", "Unknown")
                         score = face_data.get("similarity_score", 0.0)
-                        if score > 0.75:
+                        if score > 0.50:
                             display_name = name
                             print(f"Member {name} recognized")
+                            if user_to_delete:
+                                res = requests.post(base_url, data= {"type":"delete","name":user_to_delete})
+                                print(f"deleted user {user_to_delete}")
+                                user_to_delete = None
                         else: display_name = "Unknown"
                         
                     else:
@@ -135,6 +143,11 @@ def recognize_faces():
 
         cv2.imshow('Webcam Video', frame)
 
+        if user_to_delete and time()-del_time_stamp>45:
+            print("Could not authenticate user. Timeout occured")
+            user_to_delete = None
+
+
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             print("⏸ Pausing to capture new face...")
@@ -148,6 +161,10 @@ def recognize_faces():
             cv2.namedWindow("Webcam Video", cv2.WINDOW_NORMAL)
             cv2.setWindowProperty("Webcam Video", cv2.WND_PROP_TOPMOST, 1)
 
+        elif key == ord('d'):
+            user_to_delete = input("Enter the user name which is to be deleted-")
+            del_time_stamp = time()
+            
         elif key == ord('x'):
             break
 
