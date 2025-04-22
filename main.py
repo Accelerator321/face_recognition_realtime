@@ -4,7 +4,7 @@ from time import time
 face_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_frontalface_default.xml")
 eye_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_eye.xml")
 
-base_url = "https://clothing-oops-patio-strategies.trycloudflare.com/"
+base_url = None
 add_face_url = base_url
 recognize_face_url = base_url
 
@@ -28,7 +28,7 @@ def capture_faces(max_snaps=60):
 
     print("📷 Capturing faces. Press 'q' to quit early.")
     cv2.namedWindow("Face Capture", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Face Capture", cv2.WND_PROP_TOPMOST, 1)
+    # cv2.setWindowProperty("Face Capture", cv2.WND_PROP_TOPMOST, 1)
 
     while snap_count < max_snaps:
         ret, frame = cap.read()
@@ -89,7 +89,7 @@ def recognize_faces():
         return
 
     cv2.namedWindow("Webcam Video", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Webcam Video", cv2.WND_PROP_TOPMOST, 1)
+    # cv2.setWindowProperty("Webcam Video", cv2.WND_PROP_TOPMOST, 1)
 
     while True:
         ret, frame = cap.read()
@@ -172,6 +172,10 @@ def recognize_faces():
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
+    with open("server_url.txt","r") as f:
+        base_url = f.readline()
+    add_face_url = base_url
+    recognize_face_url = base_url
     while True:
         try:
             recognize_faces()
