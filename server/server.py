@@ -11,6 +11,7 @@ from pymongo import MongoClient
 # ENV-based mode config
 mode = os.environ.get("mode", "fnet").lower()
 prod = os.environ.get("prod", "false").lower() == "true"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 debug = not prod
 
 
