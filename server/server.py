@@ -29,7 +29,7 @@ class FNET:
 
 class FRM:
     def __init__(self, model, dim,
-                 mongo_uri="mongodb+srv://shyamprime2610:uHALYEwkFPag8d5s@cluster0.gspxraj.mongodb.net/?retryWrites=true&w=majority",
+                 mongo_uri=os.environ.get("db_url"),
                  db_name="face_db"):
         self.model = model
         self.dim = dim
