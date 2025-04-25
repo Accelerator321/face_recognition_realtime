@@ -155,4 +155,5 @@ def delete_user(name):
 # === For local testing ===
 if __name__ == "__main__":
     print(f"🚀 Running in mode: {mode}, debug: {debug}")
-    app.run(host="0.0.0.0", port=8000, debug=debug)
+    port = int(os.environ.get("PORT", 10000))  # fallback is optional
+    app.run(host="0.0.0.0", port=port, debug=debug)
