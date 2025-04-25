@@ -3,10 +3,11 @@ import cv2
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from typing import Tuple
+from typing import List, Tuple
 from sklearn.metrics.pairwise import cosine_similarity
-
-
+import tensorflow as tf
+from keras_facenet import FaceNet
+from pymongo import MongoClient
 # ENV-based mode config
 mode = os.environ.get("mode", "fnet").lower()
 prod = os.environ.get("prod", "false").lower() == "true"
@@ -14,143 +15,246 @@ debug = not prod
 
 
 # === Embedding model wrappers ===
+
+
+embedder = FaceNet()
 class FNET:
-    def __init__(self):
-        from keras_facenet import FaceNet
-        self.model = FaceNet()
+  def __init__(self, model):
+    self.model = model
+  def predict(self,img):
+    embedding = self.model.embeddings(img)
+    return embedding
 
-    def predict(self, img):
-        return self.model.embeddings(img)
 
 
-# === Face Recognition Module ===
 class FRM:
-    def __init__(self, model, dim):
+    def __init__(self, model, dim,
+                 mongo_uri="mongodb+srv://shyamprime2610:uHALYEwkFPag8d5s@cluster0.gspxraj.mongodb.net/?retryWrites=true&w=majority",
+                 db_name="face_db"):
         self.model = model
-        self.people = {}  # in-memory embedding store
         self.dim = dim
 
-    def add_person(self, name: str, train: np.ndarray) -> None:
-        embeddings = []
-        if name in self.people:
-            embeddings.append(self.people[name])
+        # Setup Mongo connection
+        self.client = MongoClient(mongo_uri)
+        self.db = self.client[db_name]
+        self.collection = self.db["embeddings"]
 
-        img = cv2.resize(train, self.dim)
-        img = np.expand_dims(img, axis=0)
-        embeddings.append(self.model.predict(img))
-        embeddings = np.array(embeddings)
-        self.people[name] = np.mean(embeddings, axis=0)
+        self.people = self.read_db()
+
+    def read_db(self) -> dict:
+        """Reads embeddings from MongoDB and returns them as a dictionary."""
+        people = {}
+        for doc in self.collection.find():
+            people[doc["name"]] = np.array(doc["embedding"])
+        return people
+
+    def save_db(self) -> None:
+        """Saves current in-memory embeddings to MongoDB."""
+        self.collection.delete_many({})
+        docs = [{"name": k, "embedding": v.tolist()} for k, v in self.people.items()]
+        if docs:
+            self.collection.insert_many(docs)
+
+    def add_person(self, name: str, train: List[np.ndarray]) -> None:
+        """
+        Adds a new person or updates existing person with embeddings
+        averaged over multiple training images.
+        """
+        # Resize and stack images properly into shape (n, h, w, c)
+        processed_imgs = [cv2.resize(img, self.dim) for img in train]
+        imgs_array = np.stack(processed_imgs, axis=0)
+
+        # # Get embeddings
+        embeddings = self.model.predict(imgs_array)
+        mean_embedding = np.mean(embeddings, axis=0)
+
+        # # If the person already exists, average with old embedding
+        if name in self.people:
+            mean_embedding = np.mean([self.people[name], mean_embedding], axis=0)
+
+        self.people[name] = mean_embedding
+        self.save_db()
 
     def del_person(self, name: str):
         if name in self.people:
             del self.people[name]
-            return f"Deleted {name} from database."
+            self.save_db()
+            return f"Deleted person {name} from DB"
         return None
 
     def recognize(self, img: np.ndarray) -> Tuple[float, str]:
         res = [0, None]
         img = cv2.resize(img, self.dim)
         img = np.expand_dims(img, axis=0)
-        img = self.model.predict(img)
-
+        img_embedding = self.model.predict(img)
         for name, features in self.people.items():
-            similarity = cosine_similarity(img, features.reshape(1, -1))
+            similarity = cosine_similarity(img_embedding, features.reshape(1, -1))[0][0]
             if similarity > res[0]:
                 res[0] = similarity
                 res[1] = name
-        return float(res[0]), res[1]
+        return res
 
     def is_allowed(self, img: np.ndarray) -> bool:
-        score, _ = self.recognize(img)
-        return score * 100 >= 85
+        res = self.recognize(img)
+        return res[0] * 100 >= 85
+
+    def test(self, home_group: dict, test_batch: dict):
+        """
+        home_group: dict of {name: List[np.ndarray]} — authorized people
+        test_batch: dict of {name: List[np.ndarray]} — test images from both authorized and others
+        """
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+        y_true = []
+        y_pred = []
+
+        authorized_names = set(home_group.keys())
+
+        for name, imgs in test_batch.items():
+            label = 1 if name in authorized_names else 0  # 1: should be allowed, 0: should be denied
+
+            for img in imgs:
+                prediction = self.is_allowed(img)
+                y_true.append(label)
+                y_pred.append(int(prediction))  # convert bool to int
+
+        return {
+            "accuracy": accuracy_score(y_true, y_pred),
+            "precision": precision_score(y_true, y_pred),
+            "recall": recall_score(y_true, y_pred),
+            "f1": f1_score(y_true, y_pred),
+        }
+
+
+    def recognize_batch(self, images: List[np.ndarray]) -> Tuple[dict, dict]:
+        score_tracker = []
+        name_counter = {}
+        max_score = 0
+        max_score_name = None
+
+        for img in images:
+            score, name = self.recognize(img)
+            score_tracker.append((score, name))
+
+            if score > max_score:
+                max_score = score
+                max_score_name = name
+
+            if name:
+                name_counter.setdefault(name, []).append(score)
+
+        avg_name, avg_score = None, 0
+        for name, scores in name_counter.items():
+            mean_score = np.mean(scores)
+            if mean_score > avg_score:
+                avg_score = mean_score
+                avg_name = name
+
+        return (
+            {"max_score": float(max_score), "name": max_score_name},
+            {"avg_score": float(avg_score), "name": avg_name}
+        )
+
 
 
 # === Init model based on mode ===
 if mode == "fnet":
     embedder = FNET()
-    face_system = FRM(embedder, dim=(160, 160))
-# else:
-#     model = tf.keras.models.load_model("my_model.keras")
-#     face_system = FRM(model, dim=(64, 64))
+    face_system = FRM(embedder, dim=(160, 160),db_name = "face_db_facenet")
+else:
+    model = tf.keras.models.load_model("my_model.keras")
+    face_system = FRM(model, dim=(64, 64),db_name = "face_db_cnn")
 
 # === Flask setup ===
 app = Flask(__name__)
 CORS(app)
 
+
+
+
+
 @app.route("/get", methods=["GET"])
-def get_status():
+def get():
     return jsonify({
         "status": "success",
-        "message": "Face recognition server is running!",
-        "mode": mode,
+        "message": "🚀 Flask face-upload server is running!",
         "endpoints": {
-            "/": "POST - Action router (upload, recognize, delete)",
-            "/get": "GET - Server status"
+            "/": "GET - Server status and available routes",
+            "/upload_faces": "POST - Upload one or more face images (form-data key: 'images')"
         }
     }), 200
 
-@app.route("/", methods=["POST"])
+@app.route('/', methods=['POST'])
 def home():
     files = request.files.getlist('images')
-    action_type = request.form.get('type')
-
-    if action_type == "upload":
-        name = request.form.get("name")
+    type = request.form.get('type')
+    if type == "upload":
+        name = request.form.get('name')
         return upload_faces(files, name)
-
-    if action_type == "recognize":
-        return recognize_faces(files)
-
-    if action_type == "delete":
-        name = request.form.get("name")
+    if type == "recognize":
+        return recognize_faces()
+    if type == "delete":
+        name = request.form.get('name')
         return delete_user(name)
+    return "Please mention a type", 200
 
-    return jsonify({"status": "error", "message": "Please provide valid 'type' param."}), 400
+def delete_user(name):
+  res = face_system.del_person(name)
+  if res is None:
+    return {"status": "error", "message": "User not found"},404
+
+  return {"status": "success", "message": res},200
 
 def upload_faces(files, name):
     try:
         if not name:
             return {'status': 'error', 'message': 'Name is required.'}, 400
 
-        saved = 0
-        for file in files:
-            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-            if img is not None:
-                face_system.add_person(name, img)
-                saved += 1
+        images = []
+        saved_faces = []
 
-        return {'status': 'success', 'message': f'{saved} face(s) saved for {name}'}, 200
+        for idx, file in enumerate(files):
+            file_bytes = np.frombuffer(file.read(), np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+            if img is not None:
+                images.append(img)
+                saved_faces.append(f"{name}_{idx}.jpg")
+
+        if images:
+            face_system.add_person(name, images)
+        else:
+            return {'status': 'error', 'message': 'No valid images.'}, 400
+
+        return {'status': 'success', 'saved_faces': saved_faces, "name": name}, 200
 
     except Exception as e:
+        print(e)
         return {'status': 'error', 'message': str(e)}, 500
 
-def recognize_faces(files):
+def recognize_faces():
     try:
-        results = []
-        for idx, file in enumerate(files):
-            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                results.append({'image': f'image_{idx}', 'name': 'NONE', 'similarity_score': 0.0})
-                continue
+        files = request.files.getlist('images')
+        if not files:
+            return {'status': 'error', 'message': 'No images provided.'}, 400
 
-            score, name = face_system.recognize(img)
-            results.append({
-                'image': f'image_{idx}',
-                'name': name,
-                'similarity_score': score
-            })
+        images = []
+        for file in files:
+            file_bytes = np.frombuffer(file.read(), np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            if img is not None:
+                images.append(img)
+            else:
+                images.append(None)
+
+        results = face_system.recognize_batch(images)
+        
 
         return {'status': 'success', 'recognized_faces': results}, 200
 
     except Exception as e:
+        print(e)
         return {'status': 'error', 'message': str(e)}, 500
-
-def delete_user(name):
-    msg = face_system.del_person(name)
-    if msg:
-        return {"status": "success", "message": msg}, 200
-    return {"status": "error", "message": "User not found"}, 404
-
 
 # === For local testing ===
 if __name__ == "__main__":
