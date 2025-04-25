@@ -3,6 +3,5 @@ flask-cors
 numpy
 opencv-python
 scikit-learn
-tensorflow
 keras
 keras-facenet

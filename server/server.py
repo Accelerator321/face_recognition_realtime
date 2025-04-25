@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from typing import Tuple
 from sklearn.metrics.pairwise import cosine_similarity
-import tensorflow as tf
+
 
 # ENV-based mode config
 mode = os.environ.get("mode", "fnet").lower()
@@ -69,9 +69,9 @@ class FRM:
 if mode == "fnet":
     embedder = FNET()
     face_system = FRM(embedder, dim=(160, 160))
-else:
-    model = tf.keras.models.load_model("my_model.keras")
-    face_system = FRM(model, dim=(64, 64))
+# else:
+#     model = tf.keras.models.load_model("my_model.keras")
+#     face_system = FRM(model, dim=(64, 64))
 
 # === Flask setup ===
 app = Flask(__name__)
