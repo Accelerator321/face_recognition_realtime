@@ -159,8 +159,8 @@ class FRM:
 
 # === Init model based on mode ===
 if mode == "fnet":
-    embedder = FNET()
-    face_system = FRM(embedder, dim=(160, 160),db_name = "face_db_facenet")
+    model = FNET(embedder)
+    face_system = FRM(model, dim=(160, 160),db_name = "face_db_facenet")
 else:
     model = tf.keras.models.load_model("my_model.keras")
     face_system = FRM(model, dim=(64, 64),db_name = "face_db_cnn")
