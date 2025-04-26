@@ -5,9 +5,12 @@ import aiohttp
 import asyncio
 import io
 import concurrent.futures
+import requests
 
-lock = asyncio.Lock()
-cam_loc= lock = asyncio.Lock()
+
+last_time = 0
+rate_limit = 1  # example: 1 second between requests
+
 face_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_frontalface_default.xml")
 eye_cascade = cv2.CascadeClassifier("./opencv/haarcascades/haarcascade_eye.xml")
 
@@ -22,11 +25,11 @@ last_time = 0
 import threading
 import queue
 
-frame_queue = queue.Queue(maxsize=60)
+frame_queue = queue.LifoQueue(maxsize=60)
 curr_context = "default"
 # Create lock and context
 context_lock = threading.Lock()
-
+activity_lock = threading.Lock()
 
 def change_context(new_context: str):
     """
@@ -38,7 +41,7 @@ def change_context(new_context: str):
     global curr_context
     with context_lock:
         curr_context = new_context
-    sleep(0.3)
+    # sleep(0.3)
 
 def camera_thread_func():
     global cap, curr_context, frame_queue
@@ -66,7 +69,7 @@ def camera_thread_func():
             roi = frame[y:y+h, x:x+w]
             success, encoded_image = cv2.imencode('.jpg', roi)
             if success:
-                item = (curr_context, encoded_image.tobytes())
+                item = (curr_context, encoded_image.tobytes(), time())
                 
 
                 if frame_queue.full():
@@ -116,12 +119,7 @@ def get_input(prompt):
 
 
 
-import requests
-import io
-from time import time
 
-last_time = 0
-rate_limit = 1  # example: 1 second between requests
 
 def post_request(url, data: dict, files: list):
     global last_time, rate_limit
@@ -139,101 +137,107 @@ def post_request(url, data: dict, files: list):
         file_stream = io.BytesIO(file_bytes)
         files_payload.append((key, (filename, file_stream, content_type)))
 
-    response = requests.post(url, data=data, files=files_payload)
+    response = requests.post(url, data=data, files=files_payload, allow_redirects=True)
+    # print(response.text)
     return response.json()
 
     
     
 
 
-
-def capture_faces(context, max_faces=5,rec_mode = False):
+def capture_faces(context, start_time,max_faces=5,rec_mode=False):
     images = []
-    
+
     while len(images) < max_faces:
         matched = []
 
-        # Pull all items currently in queue
-        while not frame_queue.empty() and len(images)<max_faces:
-            ctx, img_bytes = frame_queue.get()
-            if ctx == context:
-                matched.append( ('images', ('face.jpg', img_bytes, 'image/jpeg')) )
+        # Pull items but don't exceed max_faces
+        while not frame_queue.empty() and len(images) + len(matched) < max_faces:
+            ctx, img_bytes, timestamp = frame_queue.get()
+            if timestamp<start_time: break
+            # if ctx == context:
+            matched.append(('images', ('face.jpg', img_bytes, 'image/jpeg')))
 
         images.extend(matched)
 
         if len(images) >= max_faces:
             break
 
-        # Not enough images yet, wait a bit
-        sleep(1)
+        
+        sleep(0.3)  
 
     return images
 
 
 
 
+
 def add_person():
-    global curr_context
-    
-    try:
-        print("Capturing images for new user ")
+    if activity_lock.locked(): return
+    with activity_lock:
         
-        name = get_input("Please Enter the name of the person- ")
-        change_context("add_person")
+        global curr_context
+        
+        try:
+            print("Capturing images for new user ")
+            
+            name = get_input("Please Enter the name of the person- ")
+            change_context("add_person")
+            print("New user please stand facing the camera")
+            face_images = capture_faces("add_person", time(), 120)  # Show window only during this action
+            print(f"Captured {len(face_images)} faces for {name}")
+            response = post_request(
+                add_face_url,
+                files=face_images,
+                data={"name": name, "type": "upload"}
+            )
 
-        face_images = capture_faces("add_person",120, rec_mode=True)  # Show window only during this action
-        print(f"Captured {len(face_images)} faces for {name}")
-        response = post_request(
-            add_face_url,
-            files=face_images,
-            data={"name": name, "type": "upload"}
-        )
-
-        if response.get("status") == "success":
-            print(f"Response from server: {response}")
-        else:
-            print(f"Failed to upload faces. Response: {response}")
-    except Exception as e:
-        print("Error in add person",e)
-    change_context("default")
+            if response.get("status") == "success":
+                print(f" added user {response.get('name','')} with number of images {len(response.get('saved_faces',[]))}")
+            else:
+                print(f"Failed to upload faces. Response: {response}")
+        except Exception as e:
+            print("Error in add person",e)
+        change_context("default")
 
 def delete_user(timeout=45):
-    global curr_context
-    
-    name = get_input("Please Enter the name of person to delete- ")
-    start_time = time()
-    
-    print("Needs Authentication before Deleting. Please be in front of camera")
-    try:
-        while True:
-            
-            change_context("delete_user")
-            face_arr = capture_faces("delete_user",5, rec_mode=True) 
-            rec = asyncio.run(recognize_faces(face_arr))
-            if rec:
-                res = post_request(base_url, files=[],data={"type": "delete", "name": name})
-                print(f"Deleted user {name}")
+    if activity_lock.locked(): return
+    with activity_lock:
+        global curr_context
+        
+        name = get_input("Please Enter the name of person to delete- ")
+        start_time = time()
+        
+        print("Needs Authentication before Deleting. Please be in front of camera")
+        try:
+            while True:
                 
-                break
-            if time() - start_time > timeout:
-                print("Could not authenticate user. Timeout occurred")
-                break
-    except Exception as e:
-        print(f"Error in delete_user {e}")
-    
-    change_context("deafault")
+                change_context("delete_user")
+                
+                rec = recognize_faces("delete_user")
+                if rec:
+                    res = post_request(base_url, files=[],data={"type": "delete", "name": name})
+                    print(f"Deleted user {name}")
+                    
+                    break
+                if time() - start_time > timeout:
+                    print("Could not authenticate user. Timeout occurred")
+                    break
+        except Exception as e:
+            print(f"Error in delete_user {e}")
+        
+        change_context("deafault")
 
-def recognize_faces():
+def recognize_faces(context = "default"):
+    
     print("Attempting to authenticate")
-    
+        
     try:
-        face_arr= capture_faces("default",5)
+        face_arr= capture_faces(context,time(),5)
         # print("face_arr", face_arr)
-
         result = post_request(recognize_face_url, files=face_arr, data={"type": "recognize"})
         if result:
             print(result)
-
         result = result.get("recognized_faces", [{}, {}])
         score = result[0].get("max_score", 0.0)
         name = result[0].get("name", "None")
@@ -248,12 +252,12 @@ def recognize_faces():
     return False
 
 
-def input_thread():
-    while True:
-        inp = get_input("1 for adding a person and 2 for deleting a user ")
-        
-        if inp=="1": add_person()
-        if inp=="2": delete_user()
+    def input_thread():
+        while True:
+            inp = get_input("1 for adding a person and 2 for deleting a user ")
+            
+            if inp=="1": add_person()
+            if inp=="2": delete_user()
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class FNET:
 
 class FRM:
     def __init__(self, model, dim,
-                 mongo_uri=os.environ.get("db_url"),
+                 mongo_uri=os.environ.get("db_url",""),
                  db_name="face_db"):
         self.model = model
         self.dim = dim
@@ -128,13 +128,42 @@ class FRM:
 
 
     def recognize_batch(self, images: List[np.ndarray]) -> Tuple[dict, dict]:
+        if not images:
+            return (
+                {"max_score": 0.0, "name": None},
+                {"avg_score": 0.0, "name": None}
+            )
+
+        # Preprocess all images
+        resized_imgs = [cv2.resize(img, self.dim) for img in images]
+        imgs_array = np.stack(resized_imgs, axis=0)
+
+        # Get embeddings in one go
+        embeddings = self.model.predict(imgs_array)  # shape (n_images, emb_dim)
+
+        # Prepare DB embeddings
+        if not self.people:
+            return (
+                {"max_score": 0.0, "name": None},
+                {"avg_score": 0.0, "name": None}
+            )
+
+        people_names = list(self.people.keys())
+        people_embeddings = np.stack([self.people[name] for name in people_names], axis=0)  # shape (n_people, emb_dim)
+
+        # Compute cosine similarities (images x people)
+        sims = cosine_similarity(embeddings, people_embeddings)  # shape (n_images, n_people)
+
         score_tracker = []
         name_counter = {}
         max_score = 0
         max_score_name = None
 
-        for img in images:
-            score, name = self.recognize(img)
+        for sim in sims:
+            idx = np.argmax(sim)
+            score = sim[idx]
+            name = people_names[idx]
+
             score_tracker.append((score, name))
 
             if score > max_score:
@@ -144,6 +173,7 @@ class FRM:
             if name:
                 name_counter.setdefault(name, []).append(score)
 
+        # Calculate average score
         avg_name, avg_score = None, 0
         for name, scores in name_counter.items():
             mean_score = np.mean(scores)
